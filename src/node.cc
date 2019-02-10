@@ -32,8 +32,8 @@
 #include "node_platform.h"
 #include "node_process.h"
 #include "node_revert.h"
+#include "node_v8_platform-inl.h"
 #include "node_version.h"
-#include "tracing/traced_value.h"
 
 #if HAVE_OPENSSL
 #include "node_crypto.h"
@@ -56,8 +56,6 @@
 #include "handle_wrap.h"
 #include "req_wrap-inl.h"
 #include "string_bytes.h"
-#include "tracing/agent.h"
-#include "tracing/node_trace_writer.h"
 #include "util.h"
 #include "uv.h"
 #if NODE_USE_V8_PLATFORM
@@ -120,38 +118,21 @@ using v8::Exception;
 using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::HandleScope;
-using v8::Int32;
-using v8::Integer;
 using v8::Isolate;
 using v8::Just;
 using v8::Local;
 using v8::Locker;
 using v8::Maybe;
 using v8::MaybeLocal;
-using v8::Message;
-using v8::MicrotasksPolicy;
 using v8::Object;
-using v8::ObjectTemplate;
 using v8::Script;
-using v8::ScriptOrigin;
 using v8::SealHandleScope;
 using v8::String;
-using v8::TracingController;
 using v8::Undefined;
 using v8::V8;
 using v8::Value;
 
 namespace per_process {
-// Tells whether --prof is passed.
-// TODO(joyeecheung): move env->options()->prof_process to
-// per_process::cli_options.prof_process and use that instead.
-static bool v8_is_profiling = false;
-
-// TODO(joyeecheung): these are no longer necessary. Remove them.
-// See: https://github.com/nodejs/node/pull/25302#discussion_r244924196
-// Isolate on the main thread
-static Mutex main_isolate_mutex;
-static Isolate* main_isolate;
 
 // node_revert.h
 // Bit flag used to track security reverts.
@@ -165,378 +146,18 @@ bool v8_initialized = false;
 // node_internals.h
 // process-relative uptime base, initialized at start-up
 double prog_start_time;
+// Tells whether --prof is passed.
+bool v8_is_profiling = false;
+
+// node_v8_platform-inl.h
+struct V8Platform v8_platform;
 }  // namespace per_process
-
-// Ensures that __metadata trace events are only emitted
-// when tracing is enabled.
-class NodeTraceStateObserver :
-    public TracingController::TraceStateObserver {
- public:
-  void OnTraceEnabled() override {
-    char name_buffer[512];
-    if (uv_get_process_title(name_buffer, sizeof(name_buffer)) == 0) {
-      // Only emit the metadata event if the title can be retrieved
-      // successfully. Ignore it otherwise.
-      TRACE_EVENT_METADATA1("__metadata", "process_name",
-                            "name", TRACE_STR_COPY(name_buffer));
-    }
-    TRACE_EVENT_METADATA1("__metadata",
-                          "version",
-                          "node",
-                          per_process::metadata.versions.node.c_str());
-    TRACE_EVENT_METADATA1("__metadata", "thread_name",
-                          "name", "JavaScriptMainThread");
-
-    auto trace_process = tracing::TracedValue::Create();
-    trace_process->BeginDictionary("versions");
-
-#define V(key)                                                                 \
-  trace_process->SetString(#key, per_process::metadata.versions.key.c_str());
-
-    NODE_VERSIONS_KEYS(V)
-#undef V
-
-    trace_process->EndDictionary();
-
-    trace_process->SetString("arch", per_process::metadata.arch.c_str());
-    trace_process->SetString("platform",
-                             per_process::metadata.platform.c_str());
-
-    trace_process->BeginDictionary("release");
-    trace_process->SetString("name",
-                             per_process::metadata.release.name.c_str());
-#if NODE_VERSION_IS_LTS
-    trace_process->SetString("lts", per_process::metadata.release.lts.c_str());
-#endif
-    trace_process->EndDictionary();
-    TRACE_EVENT_METADATA1("__metadata", "node",
-                          "process", std::move(trace_process));
-
-    // This only runs the first time tracing is enabled
-    controller_->RemoveTraceStateObserver(this);
-  }
-
-  void OnTraceDisabled() override {
-    // Do nothing here. This should never be called because the
-    // observer removes itself when OnTraceEnabled() is called.
-    UNREACHABLE();
-  }
-
-  explicit NodeTraceStateObserver(TracingController* controller) :
-      controller_(controller) {}
-  ~NodeTraceStateObserver() override {}
-
- private:
-  TracingController* controller_;
-};
-
-static struct {
-#if NODE_USE_V8_PLATFORM
-  void Initialize(int thread_pool_size) {
-    tracing_agent_.reset(new tracing::Agent());
-    node::tracing::TraceEventHelper::SetAgent(tracing_agent_.get());
-    node::tracing::TracingController* controller =
-        tracing_agent_->GetTracingController();
-    trace_state_observer_.reset(new NodeTraceStateObserver(controller));
-    controller->AddTraceStateObserver(trace_state_observer_.get());
-    StartTracingAgent();
-    // Tracing must be initialized before platform threads are created.
-    platform_ = new NodePlatform(thread_pool_size, controller);
-    V8::InitializePlatform(platform_);
-  }
-
-  void Dispose() {
-    StopTracingAgent();
-    platform_->Shutdown();
-    delete platform_;
-    platform_ = nullptr;
-    // Destroy tracing after the platform (and platform threads) have been
-    // stopped.
-    tracing_agent_.reset(nullptr);
-    trace_state_observer_.reset(nullptr);
-  }
-
-  void DrainVMTasks(Isolate* isolate) {
-    platform_->DrainTasks(isolate);
-  }
-
-  void CancelVMTasks(Isolate* isolate) {
-    platform_->CancelPendingDelayedTasks(isolate);
-  }
-
-  void StartTracingAgent() {
-    if (per_process::cli_options->trace_event_categories.empty()) {
-      tracing_file_writer_ = tracing_agent_->DefaultHandle();
-    } else {
-      std::vector<std::string> categories =
-          SplitString(per_process::cli_options->trace_event_categories, ',');
-
-      tracing_file_writer_ = tracing_agent_->AddClient(
-          std::set<std::string>(std::make_move_iterator(categories.begin()),
-                                std::make_move_iterator(categories.end())),
-          std::unique_ptr<tracing::AsyncTraceWriter>(
-              new tracing::NodeTraceWriter(
-                  per_process::cli_options->trace_event_file_pattern)),
-          tracing::Agent::kUseDefaultCategories);
-    }
-  }
-
-  void StopTracingAgent() {
-    tracing_file_writer_.reset();
-  }
-
-  tracing::AgentWriterHandle* GetTracingAgentWriter() {
-    return &tracing_file_writer_;
-  }
-
-  NodePlatform* Platform() {
-    return platform_;
-  }
-
-  std::unique_ptr<NodeTraceStateObserver> trace_state_observer_;
-  std::unique_ptr<tracing::Agent> tracing_agent_;
-  tracing::AgentWriterHandle tracing_file_writer_;
-  NodePlatform* platform_;
-#else  // !NODE_USE_V8_PLATFORM
-  void Initialize(int thread_pool_size) {}
-  void Dispose() {}
-  void DrainVMTasks(Isolate* isolate) {}
-  void CancelVMTasks(Isolate* isolate) {}
-
-  void StartTracingAgent() {
-    if (!trace_enabled_categories.empty()) {
-      fprintf(stderr, "Node compiled with NODE_USE_V8_PLATFORM=0, "
-                      "so event tracing is not available.\n");
-    }
-  }
-  void StopTracingAgent() {}
-
-  tracing::AgentWriterHandle* GetTracingAgentWriter() {
-    return nullptr;
-  }
-
-  NodePlatform* Platform() {
-    return nullptr;
-  }
-#endif  // !NODE_USE_V8_PLATFORM
-} v8_platform;
-
-tracing::AgentWriterHandle* GetTracingAgentWriter() {
-  return v8_platform.GetTracingAgentWriter();
-}
-
-void DisposePlatform() {
-  v8_platform.Dispose();
-}
 
 #ifdef __POSIX__
 static const unsigned kMaxSignal = 32;
 #endif
 
-const char* signo_string(int signo) {
-#define SIGNO_CASE(e)  case e: return #e;
-  switch (signo) {
-#ifdef SIGHUP
-  SIGNO_CASE(SIGHUP);
-#endif
-
-#ifdef SIGINT
-  SIGNO_CASE(SIGINT);
-#endif
-
-#ifdef SIGQUIT
-  SIGNO_CASE(SIGQUIT);
-#endif
-
-#ifdef SIGILL
-  SIGNO_CASE(SIGILL);
-#endif
-
-#ifdef SIGTRAP
-  SIGNO_CASE(SIGTRAP);
-#endif
-
-#ifdef SIGABRT
-  SIGNO_CASE(SIGABRT);
-#endif
-
-#ifdef SIGIOT
-# if SIGABRT != SIGIOT
-  SIGNO_CASE(SIGIOT);
-# endif
-#endif
-
-#ifdef SIGBUS
-  SIGNO_CASE(SIGBUS);
-#endif
-
-#ifdef SIGFPE
-  SIGNO_CASE(SIGFPE);
-#endif
-
-#ifdef SIGKILL
-  SIGNO_CASE(SIGKILL);
-#endif
-
-#ifdef SIGUSR1
-  SIGNO_CASE(SIGUSR1);
-#endif
-
-#ifdef SIGSEGV
-  SIGNO_CASE(SIGSEGV);
-#endif
-
-#ifdef SIGUSR2
-  SIGNO_CASE(SIGUSR2);
-#endif
-
-#ifdef SIGPIPE
-  SIGNO_CASE(SIGPIPE);
-#endif
-
-#ifdef SIGALRM
-  SIGNO_CASE(SIGALRM);
-#endif
-
-  SIGNO_CASE(SIGTERM);
-
-#ifdef SIGCHLD
-  SIGNO_CASE(SIGCHLD);
-#endif
-
-#ifdef SIGSTKFLT
-  SIGNO_CASE(SIGSTKFLT);
-#endif
-
-
-#ifdef SIGCONT
-  SIGNO_CASE(SIGCONT);
-#endif
-
-#ifdef SIGSTOP
-  SIGNO_CASE(SIGSTOP);
-#endif
-
-#ifdef SIGTSTP
-  SIGNO_CASE(SIGTSTP);
-#endif
-
-#ifdef SIGBREAK
-  SIGNO_CASE(SIGBREAK);
-#endif
-
-#ifdef SIGTTIN
-  SIGNO_CASE(SIGTTIN);
-#endif
-
-#ifdef SIGTTOU
-  SIGNO_CASE(SIGTTOU);
-#endif
-
-#ifdef SIGURG
-  SIGNO_CASE(SIGURG);
-#endif
-
-#ifdef SIGXCPU
-  SIGNO_CASE(SIGXCPU);
-#endif
-
-#ifdef SIGXFSZ
-  SIGNO_CASE(SIGXFSZ);
-#endif
-
-#ifdef SIGVTALRM
-  SIGNO_CASE(SIGVTALRM);
-#endif
-
-#ifdef SIGPROF
-  SIGNO_CASE(SIGPROF);
-#endif
-
-#ifdef SIGWINCH
-  SIGNO_CASE(SIGWINCH);
-#endif
-
-#ifdef SIGIO
-  SIGNO_CASE(SIGIO);
-#endif
-
-#ifdef SIGPOLL
-# if SIGPOLL != SIGIO
-  SIGNO_CASE(SIGPOLL);
-# endif
-#endif
-
-#ifdef SIGLOST
-# if SIGLOST != SIGABRT
-  SIGNO_CASE(SIGLOST);
-# endif
-#endif
-
-#ifdef SIGPWR
-# if SIGPWR != SIGLOST
-  SIGNO_CASE(SIGPWR);
-# endif
-#endif
-
-#ifdef SIGINFO
-# if !defined(SIGPWR) || SIGINFO != SIGPWR
-  SIGNO_CASE(SIGINFO);
-# endif
-#endif
-
-#ifdef SIGSYS
-  SIGNO_CASE(SIGSYS);
-#endif
-
-  default: return "";
-  }
-}
-
-void* ArrayBufferAllocator::Allocate(size_t size) {
-  if (zero_fill_field_ || per_process::cli_options->zero_fill_all_buffers)
-    return UncheckedCalloc(size);
-  else
-    return UncheckedMalloc(size);
-}
-
-namespace {
-
-bool ShouldAbortOnUncaughtException(Isolate* isolate) {
-  HandleScope scope(isolate);
-  Environment* env = Environment::GetCurrent(isolate);
-  return env != nullptr &&
-         env->should_abort_on_uncaught_toggle()[0] &&
-         !env->inside_should_not_abort_on_uncaught_scope();
-}
-
-}  // anonymous namespace
-
-
-void AddPromiseHook(Isolate* isolate, promise_hook_func fn, void* arg) {
-  Environment* env = Environment::GetCurrent(isolate);
-  CHECK_NOT_NULL(env);
-  env->AddPromiseHook(fn, arg);
-}
-
-void AddEnvironmentCleanupHook(Isolate* isolate,
-                               void (*fun)(void* arg),
-                               void* arg) {
-  Environment* env = Environment::GetCurrent(isolate);
-  CHECK_NOT_NULL(env);
-  env->AddCleanupHook(fun, arg);
-}
-
-
-void RemoveEnvironmentCleanupHook(Isolate* isolate,
-                                  void (*fun)(void* arg),
-                                  void* arg) {
-  Environment* env = Environment::GetCurrent(isolate);
-  CHECK_NOT_NULL(env);
-  env->RemoveCleanupHook(fun, arg);
-}
-
-static void WaitForInspectorDisconnect(Environment* env) {
+void WaitForInspectorDisconnect(Environment* env) {
 #if HAVE_INSPECTOR
   if (env->inspector_agent()->IsActive()) {
     // Restore signal dispositions, the app is done and is no longer
@@ -554,40 +175,6 @@ static void WaitForInspectorDisconnect(Environment* env) {
     env->inspector_agent()->WaitForDisconnect();
   }
 #endif
-}
-
-void Exit(const FunctionCallbackInfo<Value>& args) {
-  Environment* env = Environment::GetCurrent(args);
-  WaitForInspectorDisconnect(env);
-  int code = args[0]->Int32Value(env->context()).FromMaybe(0);
-  env->Exit(code);
-}
-
-static void OnMessage(Local<Message> message, Local<Value> error) {
-  Isolate* isolate = message->GetIsolate();
-  switch (message->ErrorLevel()) {
-    case Isolate::MessageErrorLevel::kMessageWarning: {
-      Environment* env = Environment::GetCurrent(isolate);
-      if (!env) {
-        break;
-      }
-      Utf8Value filename(isolate,
-          message->GetScriptOrigin().ResourceName());
-      // (filename):(line) (message)
-      std::stringstream warning;
-      warning << *filename;
-      warning << ":";
-      warning << message->GetLineNumber(env->context()).FromMaybe(-1);
-      warning << " ";
-      v8::String::Utf8Value msg(isolate, message->Get());
-      warning << *msg;
-      USE(ProcessEmitWarningGeneric(env, warning.str().c_str(), "V8"));
-      break;
-    }
-    case Isolate::MessageErrorLevel::kMessageError:
-      FatalException(isolate, error, message);
-      break;
-  }
 }
 
 void SignalExit(int signo) {
@@ -659,35 +246,47 @@ MaybeLocal<Value> RunBootstrapping(Environment* env) {
   global->Set(context, FIXED_ONE_BYTE_STRING(env->isolate(), "global"), global)
       .FromJust();
 
+  // Store primordials
+  env->set_primordials(Object::New(isolate));
+  std::vector<Local<String>> primordials_params = {
+    FIXED_ONE_BYTE_STRING(isolate, "breakAtBootstrap"),
+    env->primordials_string()
+  };
+  std::vector<Local<Value>> primordials_args = {
+    Boolean::New(isolate,
+                  env->options()->debug_options().break_node_first_line),
+    env->primordials()
+  };
+  MaybeLocal<Value> primordials_ret =
+      ExecuteBootstrapper(env,
+                          "internal/bootstrap/primordials",
+                          &primordials_params,
+                          &primordials_args);
+  if (primordials_ret.IsEmpty()) {
+    return MaybeLocal<Value>();
+  }
+
   // Create binding loaders
   std::vector<Local<String>> loaders_params = {
       env->process_string(),
-      FIXED_ONE_BYTE_STRING(isolate, "getBinding"),
       FIXED_ONE_BYTE_STRING(isolate, "getLinkedBinding"),
       FIXED_ONE_BYTE_STRING(isolate, "getInternalBinding"),
-      // --inspect-brk-node
-      FIXED_ONE_BYTE_STRING(isolate, "debugBreak"),
       // --experimental-modules
       FIXED_ONE_BYTE_STRING(isolate, "experimentalModules"),
       // --expose-internals
-      FIXED_ONE_BYTE_STRING(isolate, "exposeInternals")};
+      FIXED_ONE_BYTE_STRING(isolate, "exposeInternals"),
+      env->primordials_string()};
   std::vector<Local<Value>> loaders_args = {
       process,
-      env->NewFunctionTemplate(binding::GetBinding)
-          ->GetFunction(context)
-          .ToLocalChecked(),
       env->NewFunctionTemplate(binding::GetLinkedBinding)
           ->GetFunction(context)
           .ToLocalChecked(),
       env->NewFunctionTemplate(binding::GetInternalBinding)
           ->GetFunction(context)
           .ToLocalChecked(),
-      Boolean::New(isolate,
-                   env->options()->debug_options().break_node_first_line),
-      Boolean::New(isolate,
-                   env->options()->experimental_modules),
-      Boolean::New(isolate,
-                   env->options()->expose_internals)};
+      Boolean::New(isolate, env->options()->experimental_modules),
+      Boolean::New(isolate, env->options()->expose_internals),
+      env->primordials()};
 
   // Bootstrap internal loaders
   MaybeLocal<Value> loader_exports = ExecuteBootstrapper(
@@ -707,15 +306,19 @@ MaybeLocal<Value> RunBootstrapping(Environment* env) {
       loader_exports_obj->Get(context, env->require_string()).ToLocalChecked();
   env->set_native_module_require(require.As<Function>());
 
-  // process, loaderExports, isMainThread
+  // process, loaderExports, isMainThread, ownsProcessState, primordials
   std::vector<Local<String>> node_params = {
       env->process_string(),
       FIXED_ONE_BYTE_STRING(isolate, "loaderExports"),
-      FIXED_ONE_BYTE_STRING(isolate, "isMainThread")};
+      FIXED_ONE_BYTE_STRING(isolate, "isMainThread"),
+      FIXED_ONE_BYTE_STRING(isolate, "ownsProcessState"),
+      env->primordials_string()};
   std::vector<Local<Value>> node_args = {
       process,
       loader_exports_obj,
-      Boolean::New(isolate, env->is_main_thread())};
+      Boolean::New(isolate, env->is_main_thread()),
+      Boolean::New(isolate, env->owns_process_state()),
+      env->primordials()};
 
   MaybeLocal<Value> result = ExecuteBootstrapper(
       env, "internal/bootstrap/node", &node_params, &node_args);
@@ -733,7 +336,7 @@ void MarkBootstrapComplete(const FunctionCallbackInfo<Value>& args) {
 
 MaybeLocal<Value> StartExecution(Environment* env, const char* main_script_id) {
   EscapableHandleScope scope(env->isolate());
-  CHECK_NE(main_script_id, nullptr);
+  CHECK_NOT_NULL(main_script_id);
 
   std::vector<Local<String>> parameters = {
       env->process_string(),
@@ -1130,35 +733,6 @@ void Init(int* argc,
     argv[i] = strdup(argv_[i].c_str());
 }
 
-void RunAtExit(Environment* env) {
-  env->RunAtExitCallbacks();
-}
-
-
-uv_loop_t* GetCurrentEventLoop(Isolate* isolate) {
-  HandleScope handle_scope(isolate);
-  Local<Context> context = isolate->GetCurrentContext();
-  if (context.IsEmpty())
-    return nullptr;
-  Environment* env = Environment::GetCurrent(context);
-  if (env == nullptr)
-    return nullptr;
-  return env->event_loop();
-}
-
-
-void AtExit(void (*cb)(void* arg), void* arg) {
-  auto env = Environment::GetThreadLocalEnv();
-  AtExit(env, cb, arg);
-}
-
-
-void AtExit(Environment* env, void (*cb)(void* arg), void* arg) {
-  CHECK_NOT_NULL(env);
-  env->AtExit(cb, arg);
-}
-
-
 void RunBeforeExit(Environment* env) {
   env->RunBeforeExitCallbacks();
 
@@ -1166,162 +740,18 @@ void RunBeforeExit(Environment* env) {
     EmitBeforeExit(env);
 }
 
-
-void EmitBeforeExit(Environment* env) {
-  HandleScope handle_scope(env->isolate());
-  Context::Scope context_scope(env->context());
-  Local<Value> exit_code = env->process_object()
-                               ->Get(env->context(), env->exit_code_string())
-                               .ToLocalChecked()
-                               ->ToInteger(env->context())
-                               .ToLocalChecked();
-  ProcessEmit(env, "beforeExit", exit_code).ToLocalChecked();
-}
-
-int EmitExit(Environment* env) {
-  // process.emit('exit')
-  HandleScope handle_scope(env->isolate());
-  Context::Scope context_scope(env->context());
-  Local<Object> process_object = env->process_object();
-  process_object->Set(env->context(),
-                      FIXED_ONE_BYTE_STRING(env->isolate(), "_exiting"),
-                      True(env->isolate())).FromJust();
-
-  Local<String> exit_code = env->exit_code_string();
-  int code = process_object->Get(env->context(), exit_code).ToLocalChecked()
-      ->Int32Value(env->context()).ToChecked();
-  ProcessEmit(env, "exit", Integer::New(env->isolate(), code));
-
-  // Reload exit code, it may be changed by `emit('exit')`
-  return process_object->Get(env->context(), exit_code).ToLocalChecked()
-      ->Int32Value(env->context()).ToChecked();
-}
-
-
-ArrayBufferAllocator* CreateArrayBufferAllocator() {
-  return new ArrayBufferAllocator();
-}
-
-
-void FreeArrayBufferAllocator(ArrayBufferAllocator* allocator) {
-  delete allocator;
-}
-
-
-IsolateData* CreateIsolateData(
-    Isolate* isolate,
-    uv_loop_t* loop,
-    MultiIsolatePlatform* platform,
-    ArrayBufferAllocator* allocator) {
-  return new IsolateData(
-        isolate,
-        loop,
-        platform,
-        allocator != nullptr ? allocator->zero_fill_field() : nullptr);
-}
-
-
-void FreeIsolateData(IsolateData* isolate_data) {
-  delete isolate_data;
-}
-
-
-Environment* CreateEnvironment(IsolateData* isolate_data,
-                               Local<Context> context,
-                               int argc,
-                               const char* const* argv,
-                               int exec_argc,
-                               const char* const* exec_argv) {
-  Isolate* isolate = context->GetIsolate();
-  HandleScope handle_scope(isolate);
-  Context::Scope context_scope(context);
-  // TODO(addaleax): This is a much better place for parsing per-Environment
-  // options than the global parse call.
-  std::vector<std::string> args(argv, argv + argc);
-  std::vector<std::string> exec_args(exec_argv, exec_argv + exec_argc);
-  Environment* env = new Environment(isolate_data, context);
-  env->Start(per_process::v8_is_profiling);
-  env->ProcessCliArgs(args, exec_args);
-  return env;
-}
-
-
-void FreeEnvironment(Environment* env) {
-  env->RunCleanup();
-  delete env;
-}
-
-
-Environment* GetCurrentEnvironment(Local<Context> context) {
-  return Environment::GetCurrent(context);
-}
-
-
-MultiIsolatePlatform* GetMainThreadMultiIsolatePlatform() {
-  return v8_platform.Platform();
-}
-
-
-MultiIsolatePlatform* CreatePlatform(
-    int thread_pool_size,
-    node::tracing::TracingController* tracing_controller) {
-  return new NodePlatform(thread_pool_size, tracing_controller);
-}
-
-
-MultiIsolatePlatform* InitializeV8Platform(int thread_pool_size) {
-  v8_platform.Initialize(thread_pool_size);
-  return v8_platform.Platform();
-}
-
-
-void FreePlatform(MultiIsolatePlatform* platform) {
-  delete platform;
-}
-
-Local<Context> NewContext(Isolate* isolate,
-                          Local<ObjectTemplate> object_template) {
-  Local<Context> context = Context::New(isolate, nullptr, object_template);
-  if (context.IsEmpty()) return context;
-  HandleScope handle_scope(isolate);
-
-  context->SetEmbedderData(
-      ContextEmbedderIndex::kAllowWasmCodeGeneration, True(isolate));
-
-  {
-    // Run lib/internal/per_context.js
-    Context::Scope context_scope(context);
-
-    std::vector<Local<String>> parameters = {
-        FIXED_ONE_BYTE_STRING(isolate, "global")};
-    Local<Value> arguments[] = {context->Global()};
-    MaybeLocal<Function> maybe_fn =
-        per_process::native_module_loader.LookupAndCompile(
-            context, "internal/per_context", &parameters, nullptr);
-    if (maybe_fn.IsEmpty()) {
-      return Local<Context>();
-    }
-    Local<Function> fn = maybe_fn.ToLocalChecked();
-    MaybeLocal<Value> result =
-        fn->Call(context, Undefined(isolate), arraysize(arguments), arguments);
-    // Execution failed during context creation.
-    // TODO(joyeecheung): deprecate this signature and return a MaybeLocal.
-    if (result.IsEmpty()) {
-      return Local<Context>();
-    }
-  }
-
-  return context;
-}
-
-
 inline int Start(Isolate* isolate, IsolateData* isolate_data,
                  const std::vector<std::string>& args,
                  const std::vector<std::string>& exec_args) {
   HandleScope handle_scope(isolate);
   Local<Context> context = NewContext(isolate);
   Context::Scope context_scope(context);
-  Environment env(isolate_data, context);
+  Environment env(
+      isolate_data,
+      context,
+      static_cast<Environment::Flags>(Environment::kIsMainThread |
+                                      Environment::kOwnsProcessState |
+                                      Environment::kOwnsInspector));
   env.Start(per_process::v8_is_profiling);
   env.ProcessCliArgs(args, exec_args);
 
@@ -1359,7 +789,7 @@ inline int Start(Isolate* isolate, IsolateData* isolate_data,
     do {
       uv_run(env.event_loop(), UV_RUN_DEFAULT);
 
-      v8_platform.DrainVMTasks(isolate);
+      per_process::v8_platform.DrainVMTasks(isolate);
 
       more = uv_loop_alive(env.event_loop());
       if (more)
@@ -1387,48 +817,13 @@ inline int Start(Isolate* isolate, IsolateData* isolate_data,
   env.RunCleanup();
   RunAtExit(&env);
 
-  v8_platform.DrainVMTasks(isolate);
-  v8_platform.CancelVMTasks(isolate);
+  per_process::v8_platform.DrainVMTasks(isolate);
+  per_process::v8_platform.CancelVMTasks(isolate);
 #if defined(LEAK_SANITIZER)
   __lsan_do_leak_check();
 #endif
 
   return exit_code;
-}
-
-bool AllowWasmCodeGenerationCallback(
-    Local<Context> context, Local<String>) {
-  Local<Value> wasm_code_gen =
-    context->GetEmbedderData(ContextEmbedderIndex::kAllowWasmCodeGeneration);
-  return wasm_code_gen->IsUndefined() || wasm_code_gen->IsTrue();
-}
-
-Isolate* NewIsolate(ArrayBufferAllocator* allocator, uv_loop_t* event_loop) {
-  Isolate::CreateParams params;
-  params.array_buffer_allocator = allocator;
-#ifdef NODE_ENABLE_VTUNE_PROFILING
-  params.code_event_handler = vTune::GetVtuneCodeEventHandler();
-#endif
-
-  Isolate* isolate = Isolate::Allocate();
-  if (isolate == nullptr)
-    return nullptr;
-
-  // Register the isolate on the platform before the isolate gets initialized,
-  // so that the isolate can access the platform during initialization.
-  v8_platform.Platform()->RegisterIsolate(isolate, event_loop);
-  Isolate::Initialize(isolate, params);
-
-  isolate->AddMessageListenerWithErrorLevel(OnMessage,
-      Isolate::MessageErrorLevel::kMessageError |
-      Isolate::MessageErrorLevel::kMessageWarning);
-  isolate->SetAbortOnUncaughtExceptionCallback(ShouldAbortOnUncaughtException);
-  isolate->SetMicrotasksPolicy(MicrotasksPolicy::kExplicit);
-  isolate->SetFatalErrorHandler(OnFatalError);
-  isolate->SetAllowWasmCodeGenerationCallback(AllowWasmCodeGenerationCallback);
-  v8::CpuProfiler::UseDetailedSourcePositionsForProfiling(isolate);
-
-  return isolate;
 }
 
 inline int Start(uv_loop_t* event_loop,
@@ -1450,23 +845,16 @@ inline int Start(uv_loop_t* event_loop,
     UNREACHABLE();
   }
 
-  {
-    Mutex::ScopedLock scoped_lock(per_process::main_isolate_mutex);
-    CHECK_NULL(per_process::main_isolate);
-    per_process::main_isolate = isolate;
-  }
-
   int exit_code;
   {
     Locker locker(isolate);
     Isolate::Scope isolate_scope(isolate);
     HandleScope handle_scope(isolate);
     std::unique_ptr<IsolateData, decltype(&FreeIsolateData)> isolate_data(
-        CreateIsolateData(
-            isolate,
-            event_loop,
-            v8_platform.Platform(),
-            allocator.get()),
+        CreateIsolateData(isolate,
+                          event_loop,
+                          per_process::v8_platform.Platform(),
+                          allocator.get()),
         &FreeIsolateData);
     // TODO(addaleax): This should load a real per-Isolate option, currently
     // this is still effectively per-process.
@@ -1477,14 +865,8 @@ inline int Start(uv_loop_t* event_loop,
         Start(isolate, isolate_data.get(), args, exec_args);
   }
 
-  {
-    Mutex::ScopedLock scoped_lock(per_process::main_isolate_mutex);
-    CHECK_EQ(per_process::main_isolate, isolate);
-    per_process::main_isolate = nullptr;
-  }
-
   isolate->Dispose();
-  v8_platform.Platform()->UnregisterIsolate(isolate);
+  per_process::v8_platform.Platform()->UnregisterIsolate(isolate);
 
   return exit_code;
 }
@@ -1549,7 +931,7 @@ int Start(int argc, char** argv) {
   // that happen to terminate during shutdown from being run unsafely.
   // Since uv_run cannot be called, uv_async handles held by the platform
   // will never be fully cleaned up.
-  v8_platform.Dispose();
+  per_process::v8_platform.Dispose();
 
   return exit_code;
 }

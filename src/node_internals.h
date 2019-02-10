@@ -56,6 +56,7 @@ class NativeModuleLoader;
 namespace per_process {
 extern Mutex env_var_mutex;
 extern double prog_start_time;
+extern bool v8_is_profiling;
 }  // namespace per_process
 
 // Forward declaration
@@ -85,7 +86,7 @@ void GetSockOrPeerName(const v8::FunctionCallbackInfo<v8::Value>& args) {
   args.GetReturnValue().Set(err);
 }
 
-void Exit(const v8::FunctionCallbackInfo<v8::Value>& args);
+void WaitForInspectorDisconnect(Environment* env);
 void SignalExit(int signo);
 #ifdef __POSIX__
 void RegisterSignalHandler(int signal,
@@ -243,9 +244,6 @@ void ThreadPoolWork::ScheduleWork() {
 int ThreadPoolWork::CancelWork() {
   return uv_cancel(reinterpret_cast<uv_req_t*>(&work_req_));
 }
-
-tracing::AgentWriterHandle* GetTracingAgentWriter();
-void DisposePlatform();
 
 #define TRACING_CATEGORY_NODE "node"
 #define TRACING_CATEGORY_NODE1(one)                                           \

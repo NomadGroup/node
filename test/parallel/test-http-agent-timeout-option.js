@@ -1,23 +1,23 @@
 'use strict';
 
-const { expectsError, mustCall } = require('../common');
+const { mustCall } = require('../common');
+const { strictEqual } = require('assert');
 const { Agent, get } = require('http');
 
-// Test that the `'timeout'` event is emitted on the `ClientRequest` instance
-// when the socket timeout set via the `timeout` option of the `Agent` expires.
+// Test that the listener that forwards the `'timeout'` event from the socket to
+// the `ClientRequest` instance is added to the socket when the `timeout` option
+// of the `Agent` is set.
 
 const request = get({
-  agent: new Agent({ timeout: 500 }),
-  // Non-routable IP address to prevent the connection from being established.
-  host: '192.0.2.1'
+  agent: new Agent({ timeout: 50 }),
+  lookup: () => {}
 });
 
-request.on('error', expectsError({
-  type: Error,
-  code: 'ECONNRESET',
-  message: 'socket hang up'
-}));
+request.on('socket', mustCall((socket) => {
+  strictEqual(socket.timeout, 50);
 
-request.on('timeout', mustCall(() => {
-  request.abort();
+  const listeners = socket.listeners('timeout');
+
+  strictEqual(listeners.length, 1);
+  strictEqual(listeners[0], request.timeoutCb);
 }));

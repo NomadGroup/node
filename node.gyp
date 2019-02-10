@@ -26,6 +26,7 @@
     'node_intermediate_lib_type%': 'static_library',
     'library_files': [
       'lib/internal/per_context.js',
+      'lib/internal/bootstrap/primordials.js',
       'lib/internal/bootstrap/cache.js',
       'lib/internal/bootstrap/loaders.js',
       'lib/internal/bootstrap/node.js',
@@ -85,6 +86,7 @@
       'lib/worker_threads.js',
       'lib/zlib.js',
       'lib/internal/assert.js',
+      'lib/internal/assert/assertion_error.js',
       'lib/internal/async_hooks.js',
       'lib/internal/buffer.js',
       'lib/internal/cli_table.js',
@@ -149,7 +151,6 @@
       'lib/internal/modules/esm/module_job.js',
       'lib/internal/modules/esm/module_map.js',
       'lib/internal/modules/esm/translators.js',
-      'lib/internal/safe_globals.js',
       'lib/internal/net.js',
       'lib/internal/options.js',
       'lib/internal/policy/manifest.js',
@@ -218,8 +219,8 @@
       'deps/node-inspect/lib/_inspect.js',
       'deps/node-inspect/lib/internal/inspect_client.js',
       'deps/node-inspect/lib/internal/inspect_repl.js',
-      'deps/acorn/dist/acorn.js',
-      'deps/acorn/dist/walk.js',
+      'deps/acorn/acorn/dist/acorn.js',
+      'deps/acorn/acorn-walk/dist/walk.js',
     ],
     'conditions': [
       [ 'node_shared=="true"', {
@@ -260,8 +261,9 @@
       ],
       'include_dirs': [
         'src',
-        'deps/v8/include',
+        'deps/v8/include'
       ],
+      'dependencies': [ 'deps/histogram/histogram.gyp:histogram' ],
 
       # - "C4244: conversion from 'type1' to 'type2', possible loss of data"
       #   Ususaly safe. Disable for `dep`, enable for `src`
@@ -334,13 +336,11 @@
             ['OS=="win"', {
               'libraries': [
                 'dbghelp.lib',
-                'Netapi32.lib',
                 'PsApi.lib',
                 'Ws2_32.lib',
               ],
               'dll_files': [
                 'dbghelp.dll',
-                'Netapi32.dll',
                 'PsApi.dll',
                 'Ws2_32.dll',
               ],
@@ -361,16 +361,22 @@
         'src',
         '<(SHARED_INTERMEDIATE_DIR)' # for node_natives.h
       ],
+      'dependencies': [ 'deps/histogram/histogram.gyp:histogram' ],
 
       'sources': [
+        'src/api/callback.cc',
+        'src/api/encoding.cc',
+        'src/api/environment.cc',
+        'src/api/exceptions.cc',
+        'src/api/hooks.cc',
+        'src/api/utils.cc',
+
         'src/async_wrap.cc',
-        'src/callback_scope.cc',
         'src/cares_wrap.cc',
         'src/connect_wrap.cc',
         'src/connection_wrap.cc',
         'src/debug_utils.cc',
         'src/env.cc',
-        'src/exceptions.cc',
         'src/fs_event_wrap.cc',
         'src/handle_wrap.cc',
         'src/heap_utils.cc',
@@ -390,7 +396,6 @@
         'src/node_contextify.cc',
         'src/node_credentials.cc',
         'src/node_domain.cc',
-        'src/node_encoding.cc',
         'src/node_env_var.cc',
         'src/node_errors.cc',
         'src/node_file.cc',
@@ -455,6 +460,8 @@
         'src/env.h',
         'src/env-inl.h',
         'src/handle_wrap.h',
+        'src/histogram.h',
+        'src/histogram-inl.h',
         'src/http_parser_adaptor.h',
         'src/js_stream.h',
         'src/memory_tracker.h',
@@ -493,6 +500,7 @@
         'src/node_union_bytes.h',
         'src/node_url.h',
         'src/node_version.h',
+        'src/node_v8_platform-inl.h',
         'src/node_watchdog.h',
         'src/node_worker.h',
         'src/pipe_wrap.h',
@@ -671,13 +679,11 @@
             ['OS=="win"', {
               'libraries': [
                 'dbghelp.lib',
-                'Netapi32.lib',
                 'PsApi.lib',
                 'Ws2_32.lib',
               ],
               'dll_files': [
                 'dbghelp.dll',
-                'Netapi32.dll',
                 'PsApi.dll',
                 'Ws2_32.dll',
               ],
@@ -964,6 +970,7 @@
         '<(node_lib_target_name)',
         'rename_node_bin_win',
         'deps/gtest/gtest.gyp:gtest',
+        'deps/histogram/histogram.gyp:histogram',
         'node_dtrace_header',
         'node_dtrace_ustack',
         'node_dtrace_provider',
@@ -1036,13 +1043,11 @@
             ['OS=="win"', {
               'libraries': [
                 'dbghelp.lib',
-                'Netapi32.lib',
                 'PsApi.lib',
                 'Ws2_32.lib',
               ],
               'dll_files': [
                 'dbghelp.dll',
-                'Netapi32.dll',
                 'PsApi.dll',
                 'Ws2_32.dll',
               ],

@@ -30,6 +30,17 @@ void DebugOptions::CheckOptions(std::vector<std::string>* errors) {
                       "--without-v8-platform");
   }
 #endif
+
+  if (deprecated_debug && !inspector_enabled) {
+    errors->push_back("[DEP0062]: `node --debug` and `node --debug-brk` "
+                      "are invalid. Please use `node --inspect` or "
+                      "`node --inspect-brk` instead.");
+  }
+
+  if (deprecated_debug && inspector_enabled && break_first_line) {
+    errors->push_back("[DEP0062]: `node --inspect --debug-brk` is deprecated. "
+                      "Please use `node --inspect-brk` instead.");
+  }
 }
 
 void PerProcessOptions::CheckOptions(std::vector<std::string>* errors) {
@@ -107,6 +118,20 @@ void EnvironmentOptions::CheckOptions(std::vector<std::string>* errors) {
 
 namespace options_parser {
 
+// Explicitly access the singelton instances in their dependancy order.
+// This was moved here to workaround a compiler bug.
+// Refs: https://github.com/nodejs/node/issues/25593
+
+#if HAVE_INSPECTOR
+const DebugOptionsParser DebugOptionsParser::instance;
+#endif  // HAVE_INSPECTOR
+
+const EnvironmentOptionsParser EnvironmentOptionsParser::instance;
+
+const PerIsolateOptionsParser PerIsolateOptionsParser::instance;
+
+const PerProcessOptionsParser PerProcessOptionsParser::instance;
+
 // XXX: If you add an option here, please also add it to doc/node.1 and
 // doc/api/cli.md
 // TODO(addaleax): Make that unnecessary.
@@ -142,10 +167,6 @@ DebugOptionsParser::DebugOptionsParser() {
   Implies("--debug-brk", "--debug");
   AddAlias("--debug-brk=", { "--inspect-port", "--debug-brk" });
 }
-
-#if HAVE_INSPECTOR
-const DebugOptionsParser DebugOptionsParser::instance;
-#endif  // HAVE_INSPECTOR
 
 EnvironmentOptionsParser::EnvironmentOptionsParser() {
   AddOption("--experimental-modules",
@@ -282,8 +303,6 @@ EnvironmentOptionsParser::EnvironmentOptionsParser() {
 #endif  // HAVE_INSPECTOR
 }
 
-const EnvironmentOptionsParser EnvironmentOptionsParser::instance;
-
 PerIsolateOptionsParser::PerIsolateOptionsParser() {
   AddOption("--track-heap-objects",
             "track heap object allocations for heap snapshots",
@@ -298,7 +317,15 @@ PerIsolateOptionsParser::PerIsolateOptionsParser() {
             kAllowedInEnvironment);
   AddOption("--max-old-space-size", "", V8Option{}, kAllowedInEnvironment);
   AddOption("--perf-basic-prof", "", V8Option{}, kAllowedInEnvironment);
+  AddOption("--perf-basic-prof-only-functions",
+            "",
+            V8Option{},
+            kAllowedInEnvironment);
   AddOption("--perf-prof", "", V8Option{}, kAllowedInEnvironment);
+  AddOption("--perf-prof-unwinding-info",
+            "",
+            V8Option{},
+            kAllowedInEnvironment);
   AddOption("--stack-trace-limit", "", V8Option{}, kAllowedInEnvironment);
 
 #ifdef NODE_REPORT
@@ -340,8 +367,6 @@ PerIsolateOptionsParser::PerIsolateOptionsParser() {
   Insert(&EnvironmentOptionsParser::instance,
          &PerIsolateOptions::get_per_env_options);
 }
-
-const PerIsolateOptionsParser PerIsolateOptionsParser::instance;
 
 PerProcessOptionsParser::PerProcessOptionsParser() {
   AddOption("--title",
@@ -449,8 +474,6 @@ PerProcessOptionsParser::PerProcessOptionsParser() {
          &PerProcessOptions::get_per_isolate_options);
 }
 
-const PerProcessOptionsParser PerProcessOptionsParser::instance;
-
 inline std::string RemoveBrackets(const std::string& host) {
   if (!host.empty() && host.front() == '[' && host.back() == ']')
     return host.substr(1, host.size() - 2);
@@ -525,7 +548,14 @@ void GetOptions(const FunctionCallbackInfo<Value>& args) {
     switch (option_info.type) {
       case kNoOp:
       case kV8Option:
-        value = Undefined(isolate);
+        // Special case for --abort-on-uncaught-exception which is also
+        // respected by Node.js internals
+        if (item.first == "--abort-on-uncaught-exception") {
+          value = Boolean::New(
+            isolate, original_per_env->abort_on_uncaught_exception);
+        } else {
+          value = Undefined(isolate);
+        }
         break;
       case kBoolean:
         value = Boolean::New(isolate, *parser.Lookup<bool>(field, opts));

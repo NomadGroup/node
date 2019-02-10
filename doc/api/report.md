@@ -39,6 +39,8 @@ is provided below for reference.
     "glibcVersionRuntime": "2.17",
     "glibcVersionCompiler": "2.17",
     "wordSize": "64 bit",
+    "arch": "x64",
+    "platform": "linux",
     "componentVersions": {
       "node": "12.0.0-pre",
       "v8": "7.1.302.28-node.5",
@@ -50,13 +52,16 @@ is provided below for reference.
       "napi": "3",
       "llhttp": "1.0.1",
       "http_parser": "2.8.0",
-      "openssl": "1.1.0j",
-      "arch": "x64",
-      "platform": "linux",
-      "release": "node"
+      "openssl": "1.1.0j"
     },
-    "osVersion": "Linux 3.10.0-862.el7.x86_64 #1 SMP Wed Mar 21 18:14:51 EDT 2018",
-    "machine": "Linux 3.10.0-862.el7.x86_64 #1 SMP Wed Mar 21 18:14:51 EDT 2018test_machine x86_64"
+    "release": {
+      "name": "node"
+    },
+    "osName": "Linux",
+    "osRelease": "3.10.0-862.el7.x86_64",
+    "osVersion": "#1 SMP Wed Mar 21 18:14:51 EDT 2018",
+    "osMachine": "x86_64",
+    "host": "test_machine"
   },
   "javascriptStack": {
     "message": "Error: *** test-exception.js: throwing uncaught Error",
@@ -166,50 +171,55 @@ is provided below for reference.
       "type": "async",
       "is_active": true,
       "is_referenced": false,
-      "address": "68090592",
+      "address": "0x0000000102910900",
       "details": ""
     },
     {
       "type": "timer",
       "is_active": false,
       "is_referenced": false,
-      "address": "140723513949920",
+      "address": "0x00007fff5fbfeab0",
       "details": "repeat: 0, timeout expired: 18075165916 ms ago"
     },
     {
       "type": "check",
       "is_active": true,
       "is_referenced": false,
-      "address": "140723513950072",
+      "address": "0x00007fff5fbfeb48",
       "details": ""
     },
     {
       "type": "idle",
       "is_active": false,
       "is_referenced": true,
-      "address": "140723513950192",
+      "address": "0x00007fff5fbfebc0",
       "details": ""
     },
     {
       "type": "prepare",
       "is_active": false,
       "is_referenced": false,
-      "address": "140723513950312",
+      "address": "0x00007fff5fbfec38",
       "details": ""
     },
     {
       "type": "check",
       "is_active": false,
       "is_referenced": false,
-      "address": "140723513950432",
+      "address": "0x00007fff5fbfecb0",
       "details": ""
     },
     {
       "type": "async",
       "is_active": true,
       "is_referenced": false,
-      "address": "39353856",
+      "address": "0x000000010188f2e0",
       "details": ""
+    },
+    {
+      "type": "loop",
+      "is_active": true,
+      "address": "0x000055fc7b2cb180"
     }
   ],
   "environmentVariables": {
@@ -435,10 +445,10 @@ times for the same Node.js process.
 ## Configuration
 
 Additional runtime configuration that influences the report generation
-constraints are available using `setDiagnosticReportOptions()` API.
+constraints are available using `setOptions()` API.
 
 ```js
-process.report.setDiagnosticReportOptions({
+process.report.setOptions({
   events: ['exception', 'fatalerror', 'signal'],
   signal: 'SIGUSR2',
   filename: 'myreport.json',
@@ -471,13 +481,13 @@ pertinent to the report generation. Defaults to `false`.
 
 ```js
 // Trigger report only on uncaught exceptions.
-process.report.setDiagnosticReportOptions({ events: ['exception'] });
+process.report.setOptions({ events: ['exception'] });
 
 // Trigger report for both internal errors as well as external signal.
-process.report.setDiagnosticReportOptions({ events: ['fatalerror', 'signal'] });
+process.report.setOptions({ events: ['fatalerror', 'signal'] });
 
 // Change the default signal to `SIGQUIT` and enable it.
-process.report.setDiagnosticReportOptions(
+process.report.setOptions(
   { events: ['signal'], signal: 'SIGQUIT' });
 ```
 

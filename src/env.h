@@ -256,6 +256,7 @@ constexpr size_t kFsStatsBufferLength = kFsStatsFieldsNumber * 2;
   V(port2_string, "port2")                                                     \
   V(port_string, "port")                                                       \
   V(preference_string, "preference")                                           \
+  V(primordials_string, "primordials")                                         \
   V(priority_string, "priority")                                               \
   V(process_string, "process")                                                 \
   V(promise_string, "promise")                                                 \
@@ -366,6 +367,7 @@ constexpr size_t kFsStatsBufferLength = kFsStatsFieldsNumber * 2;
   V(performance_entry_template, v8::Function)                                  \
   V(pipe_constructor_template, v8::FunctionTemplate)                           \
   V(process_object, v8::Object)                                                \
+  V(primordials, v8::Object)                                                   \
   V(promise_reject_callback, v8::Function)                                     \
   V(promise_wrap_template, v8::ObjectTemplate)                                 \
   V(sab_lifetimepartner_constructor_template, v8::FunctionTemplate)            \
@@ -595,6 +597,13 @@ class NODE_EXTERN Environment {
     DISALLOW_COPY_AND_ASSIGN(TickInfo);
   };
 
+  enum Flags {
+    kNoFlags = 0,
+    kIsMainThread = 1 << 0,
+    kOwnsProcessState = 1 << 1,
+    kOwnsInspector = 1 << 2,
+  };
+
   static inline Environment* GetCurrent(v8::Isolate* isolate);
   static inline Environment* GetCurrent(v8::Local<v8::Context> context);
   static inline Environment* GetCurrent(
@@ -608,7 +617,8 @@ class NODE_EXTERN Environment {
   static inline Environment* GetThreadLocalEnv();
 
   Environment(IsolateData* isolate_data,
-              v8::Local<v8::Context> context);
+              v8::Local<v8::Context> context,
+              Flags flags = Flags());
   ~Environment();
 
   void Start(bool start_profiler_idle_notifier);
@@ -737,12 +747,6 @@ class NODE_EXTERN Environment {
   inline performance::performance_state* performance_state();
   inline std::unordered_map<std::string, uint64_t>* performance_marks();
 
-  void CollectExceptionInfo(v8::Local<v8::Value> context,
-                            int errorno,
-                            const char* syscall = nullptr,
-                            const char* message = nullptr,
-                            const char* path = nullptr);
-
   void CollectUVExceptionInfo(v8::Local<v8::Value> context,
                               int errorno,
                               const char* syscall = nullptr,
@@ -760,8 +764,9 @@ class NODE_EXTERN Environment {
   inline void set_has_run_bootstrapping_code(bool has_run_bootstrapping_code);
 
   inline bool is_main_thread() const;
+  inline bool owns_process_state() const;
+  inline bool owns_inspector() const;
   inline uint64_t thread_id() const;
-  inline void set_thread_id(uint64_t id);
   inline worker::Worker* worker_context() const;
   inline void set_worker_context(worker::Worker* context);
   inline void add_sub_worker_context(worker::Worker* context);
@@ -1005,7 +1010,8 @@ class NODE_EXTERN Environment {
 
   bool has_run_bootstrapping_code_ = false;
   bool can_call_into_js_ = true;
-  uint64_t thread_id_ = 0;
+  Flags flags_;
+  uint64_t thread_id_;
   std::unordered_set<worker::Worker*> sub_worker_contexts_;
 
   static void* const kNodeContextTagPtr;

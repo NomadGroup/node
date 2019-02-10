@@ -682,11 +682,11 @@ bool Agent::Start(const std::string& path,
                   bool is_main) {
   path_ = path;
   debug_options_ = options;
-  CHECK_NE(host_port, nullptr);
+  CHECK_NOT_NULL(host_port);
   host_port_ = host_port;
 
   client_ = std::make_shared<NodeInspectorClient>(parent_env_, is_main);
-  if (parent_env_->is_main_thread()) {
+  if (parent_env_->owns_inspector()) {
     CHECK_EQ(start_io_thread_async_initialized.exchange(true), false);
     CHECK_EQ(0, uv_async_init(parent_env_->event_loop(),
                               &start_io_thread_async,

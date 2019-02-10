@@ -451,10 +451,11 @@ class Http2StreamListener : public StreamListener {
 class Http2Stream : public AsyncWrap,
                     public StreamBase {
  public:
-  Http2Stream(Http2Session* session,
-              int32_t id,
-              nghttp2_headers_category category = NGHTTP2_HCAT_HEADERS,
-              int options = 0);
+  static Http2Stream* New(
+      Http2Session* session,
+      int32_t id,
+      nghttp2_headers_category category = NGHTTP2_HCAT_HEADERS,
+      int options = 0);
   ~Http2Stream() override;
 
   nghttp2_stream* operator*();
@@ -611,6 +612,12 @@ class Http2Stream : public AsyncWrap,
   Statistics statistics_ = {};
 
  private:
+  Http2Stream(Http2Session* session,
+              v8::Local<v8::Object> obj,
+              int32_t id,
+              nghttp2_headers_category category,
+              int options);
+
   Http2Session* session_ = nullptr;             // The Parent HTTP/2 Session
   int32_t id_ = 0;                              // The Stream Identifier
   int32_t code_ = NGHTTP2_NO_ERROR;             // The RST_STREAM code (if any)
@@ -693,12 +700,9 @@ class Http2Session : public AsyncWrap, public StreamListener {
     return static_cast<StreamBase*>(stream_);
   }
 
-  void Start();
-  void Stop();
   void Close(uint32_t code = NGHTTP2_NO_ERROR,
              bool socket_closed = false);
   void Consume(Local<External> external);
-  void Unconsume();
   void Goaway(uint32_t code, int32_t lastStreamID, uint8_t* data, size_t len);
   void AltSvc(int32_t id,
               uint8_t* origin,
@@ -706,9 +710,6 @@ class Http2Session : public AsyncWrap, public StreamListener {
               uint8_t* value,
               size_t value_len);
   void Origin(nghttp2_origin_entry* ov, size_t count);
-
-
-  bool Ping(v8::Local<v8::Function> function);
 
   uint8_t SendPendingData();
 
@@ -792,8 +793,6 @@ class Http2Session : public AsyncWrap, public StreamListener {
   // The JavaScript API
   static void New(const FunctionCallbackInfo<Value>& args);
   static void Consume(const FunctionCallbackInfo<Value>& args);
-  static void Unconsume(const FunctionCallbackInfo<Value>& args);
-  static void Destroying(const FunctionCallbackInfo<Value>& args);
   static void Destroy(const FunctionCallbackInfo<Value>& args);
   static void Settings(const FunctionCallbackInfo<Value>& args);
   static void Request(const FunctionCallbackInfo<Value>& args);
@@ -807,9 +806,6 @@ class Http2Session : public AsyncWrap, public StreamListener {
 
   template <get_setting fn>
   static void RefreshSettings(const FunctionCallbackInfo<Value>& args);
-
-  template <get_setting fn>
-  static void GetSettings(const FunctionCallbackInfo<Value>& args);
 
   uv_loop_t* event_loop() const {
     return env()->event_loop();
@@ -1087,7 +1083,7 @@ class Http2StreamPerformanceEntry : public PerformanceEntry {
 
 class Http2Session::Http2Ping : public AsyncWrap {
  public:
-  explicit Http2Ping(Http2Session* session);
+  explicit Http2Ping(Http2Session* session, v8::Local<v8::Object> obj);
 
   void MemoryInfo(MemoryTracker* tracker) const override {
     tracker->TrackField("session", session_);
@@ -1111,8 +1107,10 @@ class Http2Session::Http2Ping : public AsyncWrap {
 // structs.
 class Http2Session::Http2Settings : public AsyncWrap {
  public:
-  explicit Http2Settings(Environment* env);
-  explicit Http2Settings(Http2Session* session);
+  Http2Settings(Environment* env,
+                Http2Session* session,
+                v8::Local<v8::Object> obj,
+                uint64_t start_time = uv_hrtime());
 
   void MemoryInfo(MemoryTracker* tracker) const override {
     tracker->TrackField("session", session_);
@@ -1136,7 +1134,6 @@ class Http2Session::Http2Settings : public AsyncWrap {
                      get_setting fn);
 
  private:
-  Http2Settings(Environment* env, Http2Session* session, uint64_t start_time);
   void Init();
   Http2Session* session_;
   uint64_t startTime_;

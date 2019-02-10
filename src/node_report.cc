@@ -28,7 +28,6 @@
 #include <cxxabi.h>
 #include <dlfcn.h>
 #include <inttypes.h>
-#include <sys/utsname.h>
 #endif
 
 #include <fcntl.h>
@@ -47,6 +46,15 @@
 #ifndef _WIN32
 extern char** environ;
 #endif
+
+#ifdef __POSIX__
+# include <netdb.h>         // MAXHOSTNAMELEN on Solaris.
+# include <sys/param.h>     // MAXHOSTNAMELEN on Linux and the BSDs.
+#endif  // __POSIX__
+
+#ifndef MAXHOSTNAMELEN
+# define MAXHOSTNAMELEN 256
+#endif  // MAXHOSTNAMELEN
 
 namespace report {
 using node::arraysize;
@@ -86,6 +94,7 @@ static void PrintGCStatistics(JSONWriter* writer, Isolate* isolate);
 static void PrintSystemInformation(JSONWriter* writer);
 static void PrintLoadedLibraries(JSONWriter* writer);
 static void PrintComponentVersions(JSONWriter* writer);
+static void PrintRelease(JSONWriter* writer);
 static void LocalTime(TIME_TYPE* tm_struct);
 
 // Global variables
@@ -302,8 +311,17 @@ static void WriteNodeReport(Isolate* isolate,
 #endif
 
   writer.json_arraystart("libuv");
-  if (env != nullptr)
+  if (env != nullptr) {
     uv_walk(env->event_loop(), WalkHandle, static_cast<void*>(&writer));
+
+    writer.json_start();
+    writer.json_keyvalue("type", "loop");
+    writer.json_keyvalue("is_active",
+        static_cast<bool>(uv_loop_alive(env->event_loop())));
+    writer.json_keyvalue("address",
+        ValueToHexString(reinterpret_cast<int64_t>(env->event_loop())));
+    writer.json_end();
+  }
 
   writer.json_arrayend();
 
@@ -341,111 +359,30 @@ static void PrintVersionInformation(JSONWriter* writer) {
 
   // Report Process word size
   writer->json_keyvalue("wordSize", sizeof(void*) * 8);
+  writer->json_keyvalue("arch", node::per_process::metadata.arch);
+  writer->json_keyvalue("platform", node::per_process::metadata.platform);
 
   // Report deps component versions
   PrintComponentVersions(writer);
 
-  // Report operating system and machine information (Windows)
-#ifdef _WIN32
-  {
-    // Level 101 to obtain the server name, type, and associated details.
-    // ref: https://docs.microsoft.com/en-us/windows/desktop/
-    // api/lmserver/nf-lmserver-netservergetinfo
-    const DWORD level = 101;
-    LPSERVER_INFO_101 os_info = nullptr;
-    NET_API_STATUS nStatus =
-        NetServerGetInfo(nullptr, level, reinterpret_cast<LPBYTE*>(&os_info));
-    if (nStatus == NERR_Success) {
-      LPSTR os_name = "Windows";
-      const DWORD major = os_info->sv101_version_major & MAJOR_VERSION_MASK;
-      const DWORD type = os_info->sv101_type;
-      const bool isServer = (type & SV_TYPE_DOMAIN_CTRL) ||
-                            (type & SV_TYPE_DOMAIN_BAKCTRL) ||
-                            (type & SV_TYPE_SERVER_NT);
-      switch (major) {
-        case 5:
-          switch (os_info->sv101_version_minor) {
-            case 0:
-              os_name = "Windows 2000";
-              break;
-            default:
-              os_name = (isServer ? "Windows Server 2003" : "Windows XP");
-          }
-          break;
-        case 6:
-          switch (os_info->sv101_version_minor) {
-            case 0:
-              os_name = (isServer ? "Windows Server 2008" : "Windows Vista");
-              break;
-            case 1:
-              os_name = (isServer ? "Windows Server 2008 R2" : "Windows 7");
-              break;
-            case 2:
-              os_name = (isServer ? "Windows Server 2012" : "Windows 8");
-              break;
-            case 3:
-              os_name = (isServer ? "Windows Server 2012 R2" : "Windows 8.1");
-              break;
-            default:
-              os_name = (isServer ? "Windows Server" : "Windows Client");
-          }
-          break;
-        case 10:
-          os_name = (isServer ? "Windows Server 2016" : "Windows 10");
-          break;
-        default:
-          os_name = (isServer ? "Windows Server" : "Windows Client");
-      }
-      writer->json_keyvalue("osVersion", os_name);
+  // Report release metadata.
+  PrintRelease(writer);
 
-      // Convert and report the machine name and comment fields
-      // (these are LPWSTR types)
-      size_t count;
-      char name_buf[256];
-      wcstombs_s(
-          &count, name_buf, sizeof(name_buf), os_info->sv101_name, _TRUNCATE);
-      if (os_info->sv101_comment != nullptr) {
-        char comment_buf[256];
-        wcstombs_s(&count,
-                   comment_buf,
-                   sizeof(comment_buf),
-                   os_info->sv101_comment,
-                   _TRUNCATE);
-        buf << name_buf << " " << comment_buf;
-        writer->json_keyvalue("machine", buf.str());
-        buf.flush();
-      } else {
-        writer->json_keyvalue("machine", name_buf);
-      }
+  // Report operating system and machine information
+  uv_utsname_t os_info;
 
-      if (os_info != nullptr) {
-        NetApiBufferFree(os_info);
-      }
-    } else {
-      // NetServerGetInfo() failed, fallback to use GetComputerName() instead
-      TCHAR machine_name[256];
-      DWORD machine_name_size = 256;
-      writer->json_keyvalue("osVersion", "Windows");
-      if (GetComputerName(machine_name, &machine_name_size)) {
-        writer->json_keyvalue("machine", machine_name);
-      }
-    }
+  if (uv_os_uname(&os_info) == 0) {
+    writer->json_keyvalue("osName", os_info.sysname);
+    writer->json_keyvalue("osRelease", os_info.release);
+    writer->json_keyvalue("osVersion", os_info.version);
+    writer->json_keyvalue("osMachine", os_info.machine);
   }
-#else
-  // Report operating system and machine information (Unix/OSX)
-  struct utsname os_info;
-  if (uname(&os_info) >= 0) {
-#ifdef _AIX
-    buf << os_info.sysname << " " << os_info.version << "." << os_info.release;
-#else
-    buf << os_info.sysname << " " << os_info.release << " " << os_info.version;
-#endif /* _AIX */
-    writer->json_keyvalue("osVersion", buf.str());
-    buf.str("");
-    buf << os_info.nodename << " " << os_info.machine;
-    writer->json_keyvalue("machine", buf.str());
-  }
-#endif
+
+  char host[MAXHOSTNAMELEN + 1];
+  size_t host_size = sizeof(host);
+
+  if (uv_os_gethostname(host, &host_size) == 0)
+    writer->json_keyvalue("host", host);
 }
 
 // Report the JavaScript stack.
@@ -724,12 +661,27 @@ static void PrintComponentVersions(JSONWriter* writer) {
   NODE_VERSIONS_KEYS(V)
 #undef V
 
-  // Some extra information that is not present in node_metadata.
-  writer->json_keyvalue("arch", NODE_ARCH);
-  writer->json_keyvalue("platform", NODE_PLATFORM);
-  writer->json_keyvalue("release", NODE_RELEASE);
-  if (NODE_VERSION_IS_LTS != 0)
-    writer->json_keyvalue("lts", NODE_VERSION_LTS_CODENAME);
+  writer->json_objectend();
+}
+
+// Report runtime release information.
+static void PrintRelease(JSONWriter* writer) {
+  writer->json_objectstart("release");
+  writer->json_keyvalue("name", node::per_process::metadata.release.name);
+#if NODE_VERSION_IS_LTS
+  writer->json_keyvalue("lts", node::per_process::metadata.release.lts);
+#endif
+
+#ifdef NODE_HAS_RELEASE_URLS
+  writer->json_keyvalue("headersUrl",
+                        node::per_process::metadata.release.headers_url);
+  writer->json_keyvalue("sourceUrl",
+                        node::per_process::metadata.release.source_url);
+#ifdef _WIN32
+  writer->json_keyvalue("libUrl", node::per_process::metadata.release.lib_url);
+#endif  // _WIN32
+#endif  // NODE_HAS_RELEASE_URLS
+
   writer->json_objectend();
 }
 

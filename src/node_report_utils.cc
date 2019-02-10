@@ -9,52 +9,37 @@ using node::MallocedBuffer;
 void ReportEndpoints(uv_handle_t* h, std::ostringstream& out) {
   struct sockaddr_storage addr_storage;
   struct sockaddr* addr = reinterpret_cast<sockaddr*>(&addr_storage);
-  char hostbuf[NI_MAXHOST];
-  char portbuf[NI_MAXSERV];
   uv_any_handle* handle = reinterpret_cast<uv_any_handle*>(h);
   int addr_size = sizeof(addr_storage);
   int rc = -1;
 
   switch (h->type) {
-    case UV_UDP: {
+    case UV_UDP:
       rc = uv_udp_getsockname(&(handle->udp), addr, &addr_size);
       break;
-    }
-    case UV_TCP: {
+    case UV_TCP:
       rc = uv_tcp_getsockname(&(handle->tcp), addr, &addr_size);
       break;
-    }
     default:
       break;
   }
   if (rc == 0) {
-    // getnameinfo will format host and port and handle IPv4/IPv6.
-    rc = getnameinfo(addr,
-                     addr_size,
-                     hostbuf,
-                     sizeof(hostbuf),
-                     portbuf,
-                     sizeof(portbuf),
-                     NI_NUMERICSERV);
-    if (rc == 0) {
-      out << std::string(hostbuf) << ":" << std::string(portbuf);
-    }
+    // uv_getnameinfo will format host and port and handle IPv4/IPv6.
+    uv_getnameinfo_t local;
+    rc = uv_getnameinfo(h->loop, &local, nullptr, addr, NI_NUMERICSERV);
+
+    if (rc == 0)
+      out << local.host << ":" << local.service;
 
     if (h->type == UV_TCP) {
       // Get the remote end of the connection.
       rc = uv_tcp_getpeername(&(handle->tcp), addr, &addr_size);
       if (rc == 0) {
-        rc = getnameinfo(addr,
-                         addr_size,
-                         hostbuf,
-                         sizeof(hostbuf),
-                         portbuf,
-                         sizeof(portbuf),
-                         NI_NUMERICSERV);
-        if (rc == 0) {
-          out << " connected to ";
-          out << std::string(hostbuf) << ":" << std::string(portbuf);
-        }
+        uv_getnameinfo_t remote;
+        rc = uv_getnameinfo(h->loop, &remote, nullptr, addr, NI_NUMERICSERV);
+
+        if (rc == 0)
+          out << " connected to " << remote.host << ":" << remote.service;
       } else if (rc == UV_ENOTCONN) {
         out << " (not connected)";
       }
@@ -70,28 +55,24 @@ void ReportPath(uv_handle_t* h, std::ostringstream& out) {
   uv_any_handle* handle = reinterpret_cast<uv_any_handle*>(h);
   // First call to get required buffer size.
   switch (h->type) {
-    case UV_FS_EVENT: {
+    case UV_FS_EVENT:
       rc = uv_fs_event_getpath(&(handle->fs_event), buffer.data, &size);
       break;
-    }
-    case UV_FS_POLL: {
+    case UV_FS_POLL:
       rc = uv_fs_poll_getpath(&(handle->fs_poll), buffer.data, &size);
       break;
-    }
     default:
       break;
   }
   if (rc == UV_ENOBUFS) {
     buffer = MallocedBuffer<char>(size);
     switch (h->type) {
-      case UV_FS_EVENT: {
+      case UV_FS_EVENT:
         rc = uv_fs_event_getpath(&(handle->fs_event), buffer.data, &size);
         break;
-      }
-      case UV_FS_POLL: {
+      case UV_FS_POLL:
         rc = uv_fs_poll_getpath(&(handle->fs_poll), buffer.data, &size);
         break;
-      }
       default:
         break;
     }
@@ -141,16 +122,12 @@ void WalkHandle(uv_handle_t* h, void* arg) {
       }
       break;
     }
-    case UV_SIGNAL: {
+    case UV_SIGNAL:
       // SIGWINCH is used by libuv so always appears.
       // See http://docs.libuv.org/en/v1.x/signal.html
-      data << "signum: " << handle->signal.signum
-#ifndef _WIN32
-           << " (" << node::signo_string(handle->signal.signum) << ")"
-#endif
-           << "";
+      data << "signum: " << handle->signal.signum << " (" <<
+              node::signo_string(handle->signal.signum) << ")";
       break;
-    }
     default:
       break;
   }
@@ -173,12 +150,12 @@ void WalkHandle(uv_handle_t* h, void* arg) {
          << ", recv buffer size: " << recv_size;
   }
 
+#ifndef _WIN32
   if (h->type == UV_TCP || h->type == UV_NAMED_PIPE || h->type == UV_TTY ||
       h->type == UV_UDP || h->type == UV_POLL) {
     uv_os_fd_t fd_v;
     int rc = uv_fileno(h, &fd_v);
-    // uv_os_fd_t is an int on Unix and HANDLE on Windows.
-#ifndef _WIN32
+
     if (rc == 0) {
       switch (fd_v) {
         case 0:
@@ -195,8 +172,8 @@ void WalkHandle(uv_handle_t* h, void* arg) {
           break;
       }
     }
-#endif
   }
+#endif
 
   if (h->type == UV_TCP || h->type == UV_NAMED_PIPE || h->type == UV_TTY) {
     data << ", write queue size: " << handle->stream.write_queue_size;
@@ -209,7 +186,7 @@ void WalkHandle(uv_handle_t* h, void* arg) {
   writer->json_keyvalue("is_active", static_cast<bool>(uv_is_active(h)));
   writer->json_keyvalue("is_referenced", static_cast<bool>(uv_has_ref(h)));
   writer->json_keyvalue("address",
-                        std::to_string(reinterpret_cast<int64_t>(h)));
+                        ValueToHexString(reinterpret_cast<uint64_t>(h)));
   writer->json_keyvalue("details", data.str());
   writer->json_end();
 }

@@ -181,7 +181,8 @@ MaybeLocal<Function> NativeModuleLoader::CompileAsModule(Environment* env,
                                            env->require_string(),
                                            env->module_string(),
                                            env->process_string(),
-                                           env->internal_binding_string()};
+                                           env->internal_binding_string(),
+                                           env->primordials_string()};
   return per_process::native_module_loader.LookupAndCompile(
       env->context(), id, &parameters, env);
 }
@@ -269,7 +270,7 @@ MaybeLocal<Function> NativeModuleLoader::LookupAndCompile(
   // Generate new cache for next compilation
   std::unique_ptr<ScriptCompiler::CachedData> new_cached_data(
       ScriptCompiler::CreateCodeCacheForFunction(fun));
-  CHECK_NE(new_cached_data, nullptr);
+  CHECK_NOT_NULL(new_cached_data);
 
   // The old entry should've been erased by now so we can just emplace
   code_cache_.emplace(id, std::move(new_cached_data));
