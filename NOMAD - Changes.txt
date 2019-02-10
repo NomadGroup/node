@@ -1,0 +1,6 @@
+- node.h: MultiIsolatePlatform* InitializeV8Platform(int thread_pool_size); -> added NODE_EXTERN
+This is required because some initialization is done inside here which uses classes that are not exported (Tracing Controller / Agent)
+
+- env.h: Environment class -> added NODE_EXTERN
+
+- node.h/cc: nomad init function

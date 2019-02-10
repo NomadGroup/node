@@ -1554,6 +1554,17 @@ int Start(int argc, char** argv) {
   return exit_code;
 }
 
+bool nomad_init()
+{
+  std::vector<std::string> argv_;
+  std::vector<std::string> exec_argv_;
+  std::vector<std::string> errors;
+
+  argv_.push_back("server-host.exe");
+
+  return Init(&argv_, &exec_argv_, &errors) == 0;
+}
+
 }  // namespace node
 
 #if !HAVE_INSPECTOR

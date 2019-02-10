@@ -456,7 +456,7 @@ enum class DebugCategory {
   CATEGORY_COUNT
 };
 
-class Environment {
+class NODE_EXTERN Environment {
  public:
   class AsyncHooks {
    public:
