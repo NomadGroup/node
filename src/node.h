@@ -1027,11 +1027,6 @@ void RegisterSignalHandler(int signal,
                            bool reset_handler = false);
 #endif  // _WIN32
 
-/*
- * Nomad
- */
-  NODE_EXTERN bool nomad_init(const std::string& executable_name);
-
 }  // namespace node
 
 #endif  // SRC_NODE_H_
