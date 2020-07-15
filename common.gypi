@@ -15,7 +15,7 @@
     'python%': 'python',
 
     'node_shared%': 'false',
-    'force_dynamic_crt%': 0,
+    'force_dynamic_crt%': 1,
     'node_use_v8_platform%': 'true',
     'node_use_bundled_v8%': 'true',
     'node_module_version%': '',
@@ -117,13 +117,7 @@
       'Debug': {
         'variables': {
           'v8_enable_handle_zapping': 1,
-          'conditions': [
-            ['node_shared != "true"', {
-              'MSVC_runtimeType': 1,    # MultiThreadedDebug (/MTd)
-            }, {
-              'MSVC_runtimeType': 3,    # MultiThreadedDebugDLL (/MDd)
-            }],
-          ],
+		  'MSVC_runtimeType': 3, # MultiThreadedDebugDLL (/MDd)
         },
         'defines': [ 'DEBUG', '_DEBUG', 'V8_ENABLE_CHECKS' ],
         'cflags': [ '-g', '-O0' ],
@@ -159,13 +153,7 @@
           'pgo_generate': ' -fprofile-generate ',
           'pgo_use': ' -fprofile-use -fprofile-correction ',
           'lto': ' -flto=4 -fuse-linker-plugin -ffat-lto-objects ',
-          'conditions': [
-            ['node_shared != "true"', {
-              'MSVC_runtimeType': 0    # MultiThreaded (/MT)
-            }, {
-              'MSVC_runtimeType': 2   # MultiThreadedDLL (/MD)
-            }],
-          ],
+          'MSVC_runtimeType': 2,   # MultiThreadedDLL (/MD)
         },
         'cflags': [ '-O3' ],
         'conditions': [

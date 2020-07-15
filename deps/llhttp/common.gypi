@@ -9,7 +9,7 @@
         'cflags': [ '-Wall', '-Wextra', '-O0', '-g', '-ftrapv' ],
         'msvs_settings': {
           'VCCLCompilerTool': {
-            'RuntimeLibrary': 1, # static debug
+            'RuntimeLibrary': 3, # MultiThreadedDebugDLL (/MDd)
           },
         },
       },
@@ -18,7 +18,7 @@
         'cflags': [ '-Wall', '-Wextra', '-O3' ],
         'msvs_settings': {
           'VCCLCompilerTool': {
-            'RuntimeLibrary': 0, # static release
+            'RuntimeLibrary': 2, # MultiThreadedDLL (/MD)
           },
         },
       }

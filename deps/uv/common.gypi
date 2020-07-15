@@ -14,13 +14,7 @@
         'cflags': [ '-g' ],
         'msvs_settings': {
           'VCCLCompilerTool': {
-            'target_conditions': [
-              ['uv_library=="static_library"', {
-                'RuntimeLibrary': 1, # /MTd static debug
-              }, {
-                'RuntimeLibrary': 3, # /MDd DLL debug
-              }],
-            ],
+            'RuntimeLibrary': 3, # /MDd DLL debug
             'Optimization': 0, # /Od, no optimization
             'MinimalRebuild': 'false',
             'OmitFramePointers': 'false',
@@ -50,13 +44,7 @@
         ],
         'msvs_settings': {
           'VCCLCompilerTool': {
-            'target_conditions': [
-              ['uv_library=="static_library"', {
-                'RuntimeLibrary': 0, # /MT static release
-              }, {
-                'RuntimeLibrary': 2, # /MD DLL release
-              }],
-            ],
+            'RuntimeLibrary': 2, # /MD DLL release
             'Optimization': 3, # /Ox, full optimization
             'FavorSizeOrSpeed': 1, # /Ot, favour speed over size
             'InlineFunctionExpansion': 2, # /Ob2, inline anything eligible

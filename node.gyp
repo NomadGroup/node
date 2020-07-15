@@ -11,7 +11,7 @@
     'node_use_v8_platform%': 'true',
     'node_use_bundled_v8%': 'true',
     'node_shared%': 'false',
-    'force_dynamic_crt%': 0,
+    'force_dynamic_crt%': 1,
     'node_module_version%': '',
     'node_shared_brotli%': 'false',
     'node_shared_zlib%': 'false',
@@ -811,6 +811,7 @@
             'Dbghelp',
             'Psapi',
             'Ws2_32',
+			'winmm'
           ],
         }],
         [ 'node_use_etw=="true"', {
